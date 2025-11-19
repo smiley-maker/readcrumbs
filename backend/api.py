@@ -4,11 +4,12 @@ import os
 import datetime
 import random
 import pickle
+import joblib
 import json
 import numpy as np
 from typing import List
 from pydantic import BaseModel
-from dotenv import load_dotenv
+import io
 
 class MyFavorites(BaseModel):
     items: List[str]
@@ -16,9 +17,6 @@ class MyFavorites(BaseModel):
 class PredictionResponse(BaseModel):
     user_id: int
     req: MyFavorites
-
-# Load environment variables from .env file
-load_dotenv()
 
 '''
 To-Do:
@@ -67,9 +65,15 @@ def load_model_from_s3(model_name: str):
     s3_bucket = 'readcrumbs'
     
     # Download model object as bytes into memory
-    response = s3.get_object(Bucket=s3_bucket, Key=model_name)
-    model_bytes = response['Body'].read()
-    model = pickle.loads(model_bytes)
+    s3_client = boto3.client('s3')
+    response = s3_client.get_object(Bucket=s3_bucket, Key=model_name)
+#    model_data = response['Body'].read()
+    buffer = io.BytesIO(response['Body'].read())
+    model = joblib.load(buffer)
+#    model_file = io.BytesIO(model_data)
+#    model = pickle.load(io.BytesIO(model_data))
+#    model = joblib.load(loaded_model)
+#    model = pickle.loads(loaded_model)
     return model
 
 def predict_using_model(model, data: MyFavorites, n_recs: int = 10):
