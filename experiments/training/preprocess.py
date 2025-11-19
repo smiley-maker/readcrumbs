@@ -223,7 +223,7 @@ def preprocess_data(df : pd.DataFrame, feats : list[str] = None) -> pd.DataFrame
 
     # Change the user id and title to categorical columns
     df["User_id"] = df["User_id"].astype("category")
-    df["Title"] = df["Title"].astype("category")
+    df["Title"] = df["Title"].astype("category"),
 
     return df
 
