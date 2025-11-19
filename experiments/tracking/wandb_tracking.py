@@ -250,85 +250,87 @@ def _get_model_extension(model_type):
     return extensions.get(model_type.lower(), "pkl")
 
 
-# Hyperparameters
-hyperparameters = {
-    "learning_rate": 0.01,
-    "batch_size": 32,
-    "epochs": 10,
-    "optimizer": "adam",
-    "loss_function": "cross_entropy",
-    # Add more hyperparameters as needed
-}
 
-# Initialize wandb with config
-wandb.init(
-    project="readcrumbs",
-    name="experiment-1",
-    config={
-        **hyperparameters,
-        "code_version": get_git_commit_hash(),
-        "data_version": get_data_version(),  # Update with your actual data path
+if __name__ == "__main__":
+    # Hyperparameters
+    hyperparameters = {
+        "learning_rate": 0.01,
+        "batch_size": 32,
+        "epochs": 10,
+        "optimizer": "adam",
+        "loss_function": "cross_entropy",
+        # Add more hyperparameters as needed
     }
-)
 
-# Example training loop
-for epoch in range(hyperparameters["epochs"]):
-    # Simulate training metrics
-    # Replace these with your actual training code
-    
-    # Log metrics for each epoch
-    metrics = {
-        "epoch": epoch + 1,
-        "loss": 0.1 * (0.9 ** epoch),  # Example: decreasing loss
-        "accuracy": 0.5 + 0.4 * (1 - 0.9 ** epoch),  # Example: increasing accuracy
-        "f1_score": 0.5 + 0.4 * (1 - 0.9 ** epoch),  # Example: increasing f1
+    # Initialize wandb with config
+    wandb.init(
+        project="readcrumbs",
+        name="experiment-1",
+        config={
+            **hyperparameters,
+            "code_version": get_git_commit_hash(),
+            "data_version": get_data_version(),  # Update with your actual data path
+        }
+    )
+
+    # Example training loop
+    for epoch in range(hyperparameters["epochs"]):
+        # Simulate training metrics
+        # Replace these with your actual training code
+        
+        # Log metrics for each epoch
+        metrics = {
+            "epoch": epoch + 1,
+            "loss": 0.1 * (0.9 ** epoch),  # Example: decreasing loss
+            "accuracy": 0.5 + 0.4 * (1 - 0.9 ** epoch),  # Example: increasing accuracy
+            "f1_score": 0.5 + 0.4 * (1 - 0.9 ** epoch),  # Example: increasing f1
+        }
+        
+        wandb.log(metrics)
+
+    # Log final metrics
+    final_metrics = {
+        "final_accuracy": metrics["accuracy"],
+        "final_f1_score": metrics["f1_score"],
     }
-    
-    wandb.log(metrics)
+    wandb.log(final_metrics)
 
-# Log final metrics
-final_metrics = {
-    "final_accuracy": metrics["accuracy"],
-    "final_f1_score": metrics["f1_score"],
-}
-wandb.log(final_metrics)
+    # Save the trained model as an artifact and register it in Model Registry
+    # Example usage (uncomment and modify based on your model):
+    # model = your_trained_model  # Replace with your actual model
+    # 
+    # # Prepare metadata with performance metrics
+    # model_metadata = {
+    #     "final_accuracy": final_metrics["final_accuracy"],
+    #     "final_f1_score": final_metrics["final_f1_score"],
+    #     "epochs": hyperparameters["epochs"],
+    #     "learning_rate": hyperparameters["learning_rate"],
+    #     "batch_size": hyperparameters["batch_size"],
+    #     "code_version": wandb.config.get("code_version", "unknown"),
+    #     "data_version": wandb.config.get("data_version", "unknown"),
+    # }
+    # 
+    # # Save and register model with automatic promotion to staging if it's the best
+    # artifact, promoted = save_and_register_model(
+    #     model=model,
+    #     model_name="readcrumbs-model",
+    #     model_type="pytorch",  # or "tensorflow", "sklearn", "pickle"
+    #     registered_model_name="readcrumbs-model",  # Name in Model Registry
+    #     metadata=model_metadata,
+    #     auto_promote=True,  # Automatically promote to staging if best model
+    #     promotion_stage="staging",  # or "production"
+    #     promotion_metric="f1_score"  # Metric to use for comparison
+    # )
+    # 
+    # if promoted:
+    #     print(f"Model automatically promoted to staging based on {promotion_metric}")
+    # 
+    # # Alternatively, manually promote to production after review:
+    # # promote_model_to_stage(
+    # #     registered_model_name="readcrumbs-model",
+    # #     alias="production",
+    # #     metric_name="f1_score",
+    # #     comparison="max"
+    # # )
 
-# Save the trained model as an artifact and register it in Model Registry
-# Example usage (uncomment and modify based on your model):
-# model = your_trained_model  # Replace with your actual model
-# 
-# # Prepare metadata with performance metrics
-# model_metadata = {
-#     "final_accuracy": final_metrics["final_accuracy"],
-#     "final_f1_score": final_metrics["final_f1_score"],
-#     "epochs": hyperparameters["epochs"],
-#     "learning_rate": hyperparameters["learning_rate"],
-#     "batch_size": hyperparameters["batch_size"],
-#     "code_version": wandb.config.get("code_version", "unknown"),
-#     "data_version": wandb.config.get("data_version", "unknown"),
-# }
-# 
-# # Save and register model with automatic promotion to staging if it's the best
-# artifact, promoted = save_and_register_model(
-#     model=model,
-#     model_name="readcrumbs-model",
-#     model_type="pytorch",  # or "tensorflow", "sklearn", "pickle"
-#     registered_model_name="readcrumbs-model",  # Name in Model Registry
-#     metadata=model_metadata,
-#     auto_promote=True,  # Automatically promote to staging if best model
-#     promotion_stage="staging",  # or "production"
-#     promotion_metric="f1_score"  # Metric to use for comparison
-# )
-# 
-# if promoted:
-#     print(f"Model automatically promoted to staging based on {promotion_metric}")
-# 
-# # Alternatively, manually promote to production after review:
-# # promote_model_to_stage(
-# #     registered_model_name="readcrumbs-model",
-# #     alias="production",
-# #     metric_name="f1_score",
-# #     comparison="max"
-# # )
-
-wandb.finish()
+    wandb.finish()
