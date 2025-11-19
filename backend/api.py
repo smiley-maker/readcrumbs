@@ -2,11 +2,20 @@ import fastapi
 import boto3
 import os
 import datetime
-import time
 import random
+import pickle
+import json
+import numpy as np
 from typing import List
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+class MyFavorites(BaseModel):
+    items: List[str]
+    
+class PredictionResponse(BaseModel):
+    user_id: int
+    req: MyFavorites
 
 # Load environment variables from .env file
 load_dotenv()
@@ -19,6 +28,20 @@ To-Do:
 '''
 
 ## Helper Functions
+def load_supporting_tables_from_s3(table_name: str):
+    """
+    Download and load supporting tables from S3 into memory without persisting it to disk.
+    """
+    s3 = boto3.client("s3")
+    s3_bucket = 'readcrumbs'
+    
+    # Download model object as bytes into memory
+    response = s3.get_object(Bucket=s3_bucket, Key=table_name)
+    table_bytes = response['Body'].read().decode('utf-8')
+    table = json.loads(table_bytes)
+    
+    return table
+
 def load_model_from_s3(model_name: str):
     """
     Download and load an ML model file from S3 into memory without persisting it to disk.
@@ -40,39 +63,22 @@ def load_model_from_s3(model_name: str):
     Returns:
         The loaded model object.
     """
-    s3_bucket = os.environ.get("S3_MODEL_BUCKET")
-    if not s3_bucket:
-        raise ValueError("S3_MODEL_BUCKET environment variable not set.")
+    s3 = boto3.client("s3")
+    s3_bucket = 'readcrumbs'
     
-    region = os.environ.get("AWS_REGION", "us-east-1")
-    
-    # Get AWS credentials from environment variables
-    aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-    aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-    aws_session_token = os.environ.get("AWS_SESSION_TOKEN")
-    
-    # Create boto3 client with explicit credentials if available
-    if aws_access_key_id and aws_secret_access_key:
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            aws_session_token=aws_session_token,
-            region_name=region
-        )
-    else:
-        # Fall back to default credential chain (IAM roles, ~/.aws/credentials, etc.)
-        s3 = boto3.client("s3", region_name=region)
-
     # Download model object as bytes into memory
     response = s3.get_object(Bucket=s3_bucket, Key=model_name)
     model_bytes = response['Body'].read()
-    import pickle
     model = pickle.loads(model_bytes)
     return model
 
-def predict_using_model(model, data):
-    pass
+def predict_using_model(model, data: MyFavorites, n_recs: int = 10):
+    my_favs_ids = [title_to_index[f] for f in data.items]
+    fav_vectors = [model.item_factors[i] for i in my_favs_ids]
+    #Average the vectors
+    avg_vec = np.average(np.stack(fav_vectors), axis=0)
+    recommendations = np.argsort(np.dot(avg_vec, model.item_factors.T))[:n_recs]
+    return [index_to_title[i] for i in recommendations]
 
 def serialize_for_dynamodb(data):
     """
@@ -183,16 +189,12 @@ def save_to_ddb(data):
     return response
 
 ## API
-class MyFavorites(BaseModel):
-    items: List[str]
-    
-class PredictionResponse(BaseModel):
-    user_id: int
-    req: MyFavorites
 
 app = fastapi.FastAPI()
 
-model = load_model_from_s3("<model_name>")
+model = load_model_from_s3("models/als_model-small-v1.pkl")
+index_to_title = load_supporting_tables_from_s3("data/v1/index_to_title.json")
+title_to_index = load_supporting_tables_from_s3("data/v1/title_to_index.json")
 
 @app.get("/health")
 def health_check():
