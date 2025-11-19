@@ -178,9 +178,7 @@ def save_to_ddb(data):
     # Map user_id to pred-id (the table's primary key field name)
     # Keep user_id in the data as well for reference
     serialized_data['pred-id'] = serialized_data['user_id']
-    
-    # DynamoDB put_item will create a new item if pred-id doesn't exist,
-    # or update/replace the existing item if pred-id already exists
+
     response = table.put_item(Item=serialized_data)
     return response
 
@@ -191,9 +189,10 @@ class MyFavorites(BaseModel):
 class PredictionResponse(BaseModel):
     user_id: int
     req: MyFavorites
-    prediction: str
 
 app = fastapi.FastAPI()
+
+model = load_model_from_s3("<model_name>")
 
 @app.get("/health")
 def health_check():
@@ -214,8 +213,8 @@ def get_random():
 
 @app.post("/predict")
 def predict(request: PredictionResponse):
-    # Automatically add current timestamp
     data = request.model_dump()
     data['timestamp'] = datetime.datetime.now(datetime.timezone.utc)
+    data['prediction'] = predict_using_model(model, data)
     save_to_ddb(data)
     return {"status": "ok"}
