@@ -1,4 +1,4 @@
-import fastapi
+from fastapi import FastAPI, HTTPException, status
 import boto3
 import os
 import datetime
@@ -13,10 +13,12 @@ import io
 
 class MyFavorites(BaseModel):
     items: List[str]
+    userid: str
     
 class PredictionResponse(BaseModel):
-    user_id: int
-    req: MyFavorites
+#    user_id: int
+#    req: MyFavorites
+    recs: List[str] # titles of the recommended books
 
 '''
 To-Do:
@@ -61,7 +63,6 @@ def load_model_from_s3(model_name: str):
     Returns:
         The loaded model object.
     """
-    s3 = boto3.client("s3")
     s3_bucket = 'readcrumbs'
     
     # Download model object as bytes into memory
@@ -76,7 +77,7 @@ def load_model_from_s3(model_name: str):
 #    model = pickle.loads(loaded_model)
     return model
 
-def predict_using_model(model, data: MyFavorites, n_recs: int = 10):
+def predict_using_model(data: MyFavorites, n_recs: int = 10):
     my_favs_ids = [title_to_index[f] for f in data.items]
     fav_vectors = [model.item_factors[i] for i in my_favs_ids]
     #Average the vectors
@@ -107,7 +108,8 @@ def get_dynamodb_table():
     """
     table_name = os.environ.get("DDB_TABLE")
     if not table_name:
-        raise ValueError("DDB_TABLE environment variable not set.")
+#        raise ValueError("DDB_TABLE environment variable not set.")
+        table_name = "readcrumbs-logs"
     
     region = os.environ.get("AWS_REGION", "us-east-1")
     
@@ -187,14 +189,14 @@ def save_to_ddb(data):
     
     # Map user_id to pred-id (the table's primary key field name)
     # Keep user_id in the data as well for reference
-    serialized_data['pred-id'] = serialized_data['user_id']
+#    serialized_data['pred-id'] = serialized_data['user_id']
 
     response = table.put_item(Item=serialized_data)
     return response
 
 ## API
 
-app = fastapi.FastAPI()
+app = FastAPI()
 
 model = load_model_from_s3("models/als_model-small-v1.pkl")
 index_to_title = load_supporting_tables_from_s3("data/v1/index_to_title.json")
@@ -214,13 +216,33 @@ def get_random():
     """
     random_item = get_random_item_from_ddb()
     if random_item is None:
-        raise fastapi.HTTPException(status_code=404, detail="No items found in table")
+        raise HTTPException(status_code=404, detail="No items found in table")
     return random_item
 
 @app.post("/predict")
-def predict(request: PredictionResponse):
-    data = request.model_dump()
-    data['timestamp'] = datetime.datetime.now(datetime.timezone.utc)
-    data['prediction'] = predict_using_model(model, data)
-    save_to_ddb(data)
-    return {"status": "ok"}
+def predict(request: MyFavorites) -> PredictionResponse:
+    # Create a dictionary from the request and other metrics. 
+    if len(request.items) < 1 or type(request.items) != List:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Must enter at least one favorite book.")
+
+    try:
+        recs = predict_using_model(request.items)
+        logs = {
+            "items": request.items,
+            "user_id": request.userid,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            "prediction": recs
+        }
+
+        save_to_ddb(logs)
+
+        return {
+            "recs": recs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+#    data = request.model_dump()
+#    data['timestamp'] = datetime.datetime.now(datetime.timezone.utc)
+#    data['prediction'] = predict_using_model(model, data)
+#    save_to_ddb(data)
+#    return {"status": "ok"}
