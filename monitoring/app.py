@@ -66,7 +66,7 @@ if user_id_input:
         st.warning("Please enter a valid numeric user ID.")
 
 if recent is not None:
-    feedback = st.radio("Was this prediction correct?", ['Yes', 'No'])
+    feedback = st.radio("Are these recommendations relevant to you?", ['Yes', 'No'])
     feedback_submitted = st.button("Submit Feedback")
     if feedback_submitted:
 
