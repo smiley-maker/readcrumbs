@@ -102,12 +102,16 @@ def save_model_artifact(model, model_name="model", model_type="pytorch", metadat
             artifact.wait()  # Wait for artifact to be logged
             run = wandb.run
             if run:
-                # Link artifact to registered model
-                run.link_artifact(
-                    artifact,
-                    f"{registered_model_name}:latest",
-                    aliases=["latest"]
-                )
+                try:
+                    # Link artifact to registered model
+                    run.link_artifact(
+                        artifact,
+                        f"{registered_model_name}:latest",
+                        aliases=["latest"]
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not link artifact to registered model: {e}")
+                    print(f"Artifact '{artifact.name}' was saved but not linked to model registry.")
     
     return artifact
 
@@ -116,6 +120,9 @@ def promote_model_to_stage(registered_model_name, alias="staging", metric_name="
                            metric_value=None, comparison="max", project_name=None):
     """
     Promote a model version to a specific stage (staging/production) in the Model Registry.
+    
+    Note: This function uses the artifact API to manage model aliases. The model must have
+    been previously linked to a registered model using run.link_artifact().
     
     Args:
         registered_model_name: Name of the registered model in Model Registry
@@ -131,62 +138,179 @@ def promote_model_to_stage(registered_model_name, alias="staging", metric_name="
     try:
         api = wandb.Api()
         
-        # Get project name from current run if not provided
+        # Get project name and entity from current run if not provided
         if project_name is None:
             project_name = wandb.run.project if wandb.run else "readcrumbs"
         
-        # Access registered model
-        registered_model_path = f"{project_name}/{registered_model_name}"
-        registered_model = api.registered_model(registered_model_path)
+        entity = None
+        if wandb.run:
+            entity = wandb.run.entity if hasattr(wandb.run, 'entity') else None
         
-        if metric_value is not None:
-            # Find the best model based on metric
-            best_version = None
-            best_metric = float('-inf') if comparison == "max" else float('inf')
-            
-            for version in registered_model.versions:
-                # Get metadata from the artifact
-                try:
-                    artifact = version.artifact
-                    version_metadata = artifact.metadata or {}
-                    version_metric = version_metadata.get(metric_name)
-                    
-                    if version_metric is not None:
-                        if comparison == "max" and version_metric > best_metric:
-                            best_metric = version_metric
-                            best_version = version
-                        elif comparison == "min" and version_metric < best_metric:
-                            best_metric = version_metric
-                            best_version = version
-                except Exception:
-                    continue
-            
-            if best_version:
-                # Update aliases
-                current_aliases = list(best_version.aliases) if best_version.aliases else []
-                if alias not in current_aliases:
-                    current_aliases.append(alias)
-                    best_version.aliases = current_aliases
-                    best_version.update()
-                    print(f"Promoted model version {best_version.version} to '{alias}' stage "
-                          f"(metric: {metric_name}={best_metric})")
-                    return True
+        # First, try to use artifact_collection if available
+        collection = None
+        versions = []
+        use_fallback = False
+        
+        if hasattr(api, 'artifact_collection'):
+            try:
+                collection = api.artifact_collection(registered_model_name, project_name, entity)
+                versions = collection.versions()
+            except Exception as collection_error:
+                # Fallback: search for artifacts by name pattern
+                print(f"Could not access artifact collection directly: {collection_error}")
+                use_fallback = True
         else:
-            # Promote the latest version
-            if registered_model.versions:
-                latest_version = registered_model.versions[0]
+            # API method doesn't exist, use fallback
+            use_fallback = True
+        
+        if use_fallback or not versions:
+            print(f"Attempting alternative method to find model artifacts...")
+            
+            # Search through project runs for linked artifacts
+            try:
+                runs = api.runs(f"{entity}/{project_name}" if entity else project_name, per_page=100)
+                artifact_paths = []
+                
+                for run in runs:
+                    try:
+                        # Get artifacts used by this run
+                        for artifact_collection in run.used_artifacts():
+                            artifact_str = str(artifact_collection)
+                            # Check if this artifact is linked to our registered model
+                            if registered_model_name in artifact_str:
+                                artifact_paths.append(artifact_str)
+                    except Exception:
+                        continue
+                
+                if not artifact_paths:
+                    print(f"Note: No artifacts found for registered model '{registered_model_name}'. "
+                          f"Make sure the model has been registered using run.link_artifact().")
+                    return False
+                
+                # Get artifacts and work with them
+                artifacts = []
+                for path in artifact_paths[:20]:  # Limit to avoid too many API calls
+                    try:
+                        artifact = api.artifact(path)
+                        artifacts.append(artifact)
+                    except Exception:
+                        continue
+                
+                if not artifacts:
+                    print(f"Could not retrieve artifacts for model '{registered_model_name}'")
+                    return False
+                
+                # Sort by creation time (newest first)
+                artifacts.sort(key=lambda a: a.created_at if hasattr(a, 'created_at') else 0, reverse=True)
+                
+                if metric_value is None:
+                    # Promote the latest version
+                    latest_artifact = artifacts[0]
+                    current_aliases = list(latest_artifact.aliases) if latest_artifact.aliases else []
+                    if alias not in current_aliases:
+                        current_aliases.append(alias)
+                        latest_artifact.aliases = current_aliases
+                        latest_artifact.save()
+                        print(f"Promoted latest model version to '{alias}' stage")
+                        return True
+                    return False
+                
+                # Find best model based on metric
+                best_artifact = None
+                best_metric = float('-inf') if comparison == "max" else float('inf')
+                
+                for artifact in artifacts:
+                    try:
+                        version_metadata = artifact.metadata or {}
+                        version_metric = version_metadata.get(metric_name)
+                        
+                        if version_metric is not None:
+                            if comparison == "max" and version_metric > best_metric:
+                                best_metric = version_metric
+                                best_artifact = artifact
+                            elif comparison == "min" and version_metric < best_metric:
+                                best_metric = version_metric
+                                best_artifact = artifact
+                    except Exception:
+                        continue
+                
+                if best_artifact:
+                    current_aliases = list(best_artifact.aliases) if best_artifact.aliases else []
+                    if alias not in current_aliases:
+                        current_aliases.append(alias)
+                        best_artifact.aliases = current_aliases
+                        best_artifact.save()
+                        print(f"Promoted model to '{alias}' stage (metric: {metric_name}={best_metric})")
+                        return True
+                
+                return False
+                
+            except Exception as search_error:
+                print(f"Error searching for artifacts: {search_error}")
+                return False
+        
+        # If we successfully got the collection, work with versions
+        if versions:
+            if metric_value is None:
+                # Promote the latest version
+                latest_version = versions[0]
                 current_aliases = list(latest_version.aliases) if latest_version.aliases else []
                 if alias not in current_aliases:
                     current_aliases.append(alias)
                     latest_version.aliases = current_aliases
-                    latest_version.update()
-                    print(f"Promoted latest model version {latest_version.version} to '{alias}' stage")
+                    latest_version.save()
+                    print(f"Promoted latest model version to '{alias}' stage")
                     return True
+            else:
+                # Find the best model based on metric
+                best_version = None
+                best_metric = float('-inf') if comparison == "max" else float('inf')
+                
+                for version in versions:
+                    try:
+                        version_metadata = version.metadata or {}
+                        version_metric = version_metadata.get(metric_name)
+                        
+                        if version_metric is not None:
+                            if comparison == "max" and version_metric > best_metric:
+                                best_metric = version_metric
+                                best_version = version
+                            elif comparison == "min" and version_metric < best_metric:
+                                best_metric = version_metric
+                                best_version = version
+                    except Exception:
+                        continue
+                
+                if best_version:
+                    current_aliases = list(best_version.aliases) if best_version.aliases else []
+                    if alias not in current_aliases:
+                        current_aliases.append(alias)
+                        best_version.aliases = current_aliases
+                        best_version.save()
+                        print(f"Promoted model version to '{alias}' stage "
+                              f"(metric: {metric_name}={best_metric})")
+                        return True
         
+        # If collection method didn't work, we already tried the fallback above
+        # If we reach here and versions is empty, the fallback should have handled it
+        if not versions:
+            return False
+        
+        return False
+        
+    except AttributeError as e:
+        # Handle the specific case where API methods don't exist
+        print(f"Error: Model registry API not available in this wandb version. "
+              f"Consider updating wandb: pip install --upgrade wandb")
+        print(f"Original error: {e}")
+        print(f"Note: Model linking via run.link_artifact() should still work. "
+              f"Promotion to stages may need to be done manually in the wandb UI.")
         return False
     except Exception as e:
         print(f"Error promoting model: {e}")
         print(f"Note: Make sure the registered model '{registered_model_name}' exists in the Model Registry.")
+        import traceback
+        traceback.print_exc()
         return False
 
 
