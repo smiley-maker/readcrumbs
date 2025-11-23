@@ -3,7 +3,6 @@ import boto3
 import os
 import datetime
 import random
-import pickle
 import joblib
 import json
 import numpy as np
@@ -12,37 +11,35 @@ from pydantic import BaseModel
 import io
 
 class MyFavorites(BaseModel):
-    items: List[str]
-    userid: str
+    items: List[str] # List of favorite book titles
+    userid: str # Unique user identifier
     
 class PredictionResponse(BaseModel):
-#    user_id: int
-#    req: MyFavorites
     recs: List[str] # titles of the recommended books
 
-'''
-To-Do:
-- [ ] Connect to S3 w/ model
-- [ ] Create a function to load the model from S3
-- [ ] Create a function to predict using the model
-'''
-
 ## Helper Functions
-def load_supporting_tables_from_s3(table_name: str):
+def load_supporting_tables_from_s3(table_name: str, client = None) -> dict:
+    """Download and load supporting tables from S3 into memory without persisting it to disk.
+
+    Args:
+        table_name (str): Name of the table in S3.
+
+    Returns:
+        dict: Dictionary representing the table.
     """
-    Download and load supporting tables from S3 into memory without persisting it to disk.
-    """
-    s3 = boto3.client("s3")
+    if client is None:
+        client = boto3.client("s3")
+    
     s3_bucket = 'readcrumbs'
     
-    # Download model object as bytes into memory
-    response = s3.get_object(Bucket=s3_bucket, Key=table_name)
+    # Download the object as bytes into memory
+    response = client.get_object(Bucket=s3_bucket, Key=table_name)
     table_bytes = response['Body'].read().decode('utf-8')
     table = json.loads(table_bytes)
     
     return table
 
-def load_model_from_s3(model_name: str):
+def load_model_from_s3(model_name: str, client = None):
     """
     Download and load an ML model file from S3 into memory without persisting it to disk.
     
@@ -65,25 +62,40 @@ def load_model_from_s3(model_name: str):
     """
     s3_bucket = 'readcrumbs'
     
-    # Download model object as bytes into memory
-    s3_client = boto3.client('s3')
-    response = s3_client.get_object(Bucket=s3_bucket, Key=model_name)
-#    model_data = response['Body'].read()
+    # Check if client is none, then create one
+    if client is None:
+        client = boto3.client('s3')
+    
+    # Get the model object from S3
+    response = client.get_object(Bucket=s3_bucket, Key=model_name)
+    
+    # Load the model from the bytes in memory
     buffer = io.BytesIO(response['Body'].read())
     model = joblib.load(buffer)
-#    model_file = io.BytesIO(model_data)
-#    model = pickle.load(io.BytesIO(model_data))
-#    model = joblib.load(loaded_model)
-#    model = pickle.loads(loaded_model)
+
     return model
 
-def predict_using_model(data: MyFavorites, n_recs: int = 10):
-    my_favs_ids = [title_to_index[f] for f in data.items]
-    fav_vectors = [model.item_factors[i] for i in my_favs_ids]
-    #Average the vectors
+def predict_using_model(data: MyFavorites, n_recs: int = 10) -> list[str]:
+    """Gets n_recs recommendations based on the users favorite books.
+
+    Args:
+        data (MyFavorites): The users favorite book titles.
+        n_recs (int, optional): Number of recommendations to return. Defaults to 10.
+
+    Returns:
+        list[str]: List of recommended book titles.
+    """
+
+    # Get the book ids for the user's favorite books
+    my_favs_ids = [title_to_index[f] for f in data]
+    # Get the item vectors for the user's favorite books using the model
+    fav_vectors = [model.item_factors[int(i)] for i in my_favs_ids]
+    #Average the vectors together to get a single user vector
     avg_vec = np.average(np.stack(fav_vectors), axis=0)
+    # Get the top n_recs recommendations by finding the closest item vectors to the user vector
     recommendations = np.argsort(np.dot(avg_vec, model.item_factors.T))[:n_recs]
-    return [index_to_title[i] for i in recommendations]
+    # Convert the item ids back to titles
+    return [index_to_title[str(i)] for i in recommendations]
 
 def serialize_for_dynamodb(data):
     """
@@ -99,14 +111,16 @@ def serialize_for_dynamodb(data):
     else:
         return data
 
-def get_dynamodb_table():
+
+
+def get_dynamodb_table(table_name: str = None):
     """
     Get a DynamoDB table resource with proper credentials.
     
     Returns:
         boto3 DynamoDB Table resource
     """
-    table_name = os.environ.get("DDB_TABLE")
+#    table_name = os.environ.get("DDB_TABLE")
     if not table_name:
 #        raise ValueError("DDB_TABLE environment variable not set.")
         table_name = "readcrumbs-logs"
@@ -140,11 +154,9 @@ def get_random_item_from_ddb():
     Returns:
         dict: A random item from the table, or None if table is empty
     """
-    table = get_dynamodb_table()
+    table = get_dynamodb_table("readcrumbs-logs")
     
     # Scan the table to get all items
-    # Note: For very large tables, this could be expensive.
-    # Consider optimizing with pagination or sampling if needed.
     response = table.scan()
     items = response.get('Items', [])
     
@@ -159,48 +171,45 @@ def get_random_item_from_ddb():
     # Return a random item
     return random.choice(items)
 
-def save_to_ddb(data):
+
+def save_to_ddb(data, table_name: str = None):
     """
     Save or update a dictionary of data to DynamoDB.
     Uses user_id (integer) as the primary key. If user_id already exists, the item will be updated.
     
-    Uses AWS credentials from environment variables if available:
-    - AWS_ACCESS_KEY_ID
-    - AWS_SECRET_ACCESS_KEY
-    - AWS_SESSION_TOKEN (optional, for temporary credentials)
-    
-    Falls back to IAM roles (if running on EC2, Lambda, ECS, etc.) or ~/.aws/credentials
-    
-    Required environment variables:
-    - DDB_TABLE: DynamoDB table name
-    - AWS_REGION: AWS region (optional, defaults to us-east-1)
-    
     Args:
         data: Dictionary containing user_id (int) and other fields. user_id is used as primary key.
+        table_name (str, optional): Name of the DynamoDB table. 
+            If None, defaults to "readcrumbs-logs".
+    
+    Returns:
+        dict: Response from DynamoDB put_item operation.
     """
-    table = get_dynamodb_table()
+
+    # Get the DynamoDB table with the table name
+    table = get_dynamodb_table(table_name)
     
     # Serialize data for DynamoDB (convert datetime objects, etc.)
     serialized_data = serialize_for_dynamodb(data)
     
     # Ensure user_id exists (required as primary key)
-    if 'user_id' not in serialized_data:
-        raise ValueError("user_id is required in the request body")
+    if 'userid' not in serialized_data:
+        raise ValueError("userid is required in the request body")
     
-    # Map user_id to pred-id (the table's primary key field name)
-    # Keep user_id in the data as well for reference
-#    serialized_data['pred-id'] = serialized_data['user_id']
-
     response = table.put_item(Item=serialized_data)
+    print(response)
     return response
 
 ## API
 
 app = FastAPI()
 
-model = load_model_from_s3("models/als_model-small-v1.pkl")
-index_to_title = load_supporting_tables_from_s3("data/v1/index_to_title.json")
-title_to_index = load_supporting_tables_from_s3("data/v1/title_to_index.json")
+# Set up a client so we don't have to keep recreating it
+s3_client = boto3.client("s3")
+
+model = load_model_from_s3("models/als_model-small-v1.pkl", client=s3_client)
+index_to_title = load_supporting_tables_from_s3("data/v1/index_to_title.json", client=s3_client)
+title_to_index = load_supporting_tables_from_s3("data/v1/title_to_index.json", client=s3_client)
 
 @app.get("/health")
 def health_check():
@@ -219,30 +228,64 @@ def get_random():
         raise HTTPException(status_code=404, detail="No items found in table")
     return random_item
 
+
+@app.post("/feedback")
+def submit_feedback(feedback: dict):
+    """Submit feedback to DynamoDB.
+
+    Args:
+        feedback (dict): Feedback data to store in DynamoDB.
+
+    Raises: 
+        HTTPException500: 500 error for any issues during saving feedback.
+
+    Returns:
+        dict: Response from DynamoDB put_item operation.
+    """
+    try:
+        response = save_to_ddb(feedback, table_name="readcrumbs-feedback")
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error saving feedback: {str(e)}")
+
+
 @app.post("/predict")
 def predict(request: MyFavorites) -> PredictionResponse:
-    # Create a dictionary from the request and other metrics. 
-    if len(request.items) < 1 or type(request.items) != List:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Must enter at least one favorite book.")
+    """Get book recommendations from the users favorite titles. 
+
+    Args:
+        request (MyFavorites): Includes items, which is a list of favorite book titles,
+                                and userid, a unique user identifier.
+
+    Raises:
+        HTTPException400: 400 error if no favorite books are provided.
+        HTTPException500: 500 error for any other issues during prediction.
+
+    Returns:
+        PredictionResponse: The predicted book recommendations.
+    """
+    if len(request.items) < 1:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Must enter at least one favorite book. You gave: {request.items}")
 
     try:
+        # Get recommendations using the model
         recs = predict_using_model(request.items)
+
+        # Log the request and prediction to DynamoDB
         logs = {
             "items": request.items,
-            "user_id": request.userid,
+            "userid": request.userid,
             "timestamp": datetime.datetime.now(datetime.timezone.utc),
             "prediction": recs
         }
 
-        save_to_ddb(logs)
+        # Save the logs to DynamoDB
+        save_to_ddb(logs, table_name="readcrumbs-logs")
 
+        # Return the recommendations as a PredictionResponse
         return {
             "recs": recs
         }
+    
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-#    data = request.model_dump()
-#    data['timestamp'] = datetime.datetime.now(datetime.timezone.utc)
-#    data['prediction'] = predict_using_model(model, data)
-#    save_to_ddb(data)
-#    return {"status": "ok"}
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"{str(e)}\Request: {request}")
