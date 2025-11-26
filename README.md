@@ -43,6 +43,7 @@ The system is split into three main containerized services:
 1. **ML Model Backend**: A Python FastAPI application that:
    - Loads the Matrix Factorization model from S3
    - Serves predictions via `/predict` endpoint
+   - Serves a `/feedback` endpoint for saving user feedback to DynamoDB.
    - Logs all requests to DynamoDB for monitoring
    - Handles model inference with supporting lookup tables
 
@@ -50,45 +51,48 @@ The system is split into three main containerized services:
    - Provides a user-friendly interface for inputting favorite books
    - Displays real-time recommendations from the FastAPI backend
    - Handles user interactions and API communication
+   - Provides an option for feedback on recommendations. 
 
 3. **Model Monitoring Dashboard**: A Streamlit dashboard that:
    - Connects directly to DynamoDB to visualize prediction logs
    - Tracks prediction latency over time
-   - Monitors data drift and prediction distribution
    - Collects and displays user feedback for model accuracy
+   - Calculates Recall at K based on new feedback.
 
 ## Technology Stack
 
-- **Backend**: FastAPI, Python 3.11+
+- **Backend**: FastAPI, Python 3.12+
 - **Frontend**: Streamlit
-- **ML Framework**: scikit-learn, joblib
+- **ML Framework**: scikit-learn, joblib, implicit for ALS model
 - **Cloud Services**: AWS (S3, DynamoDB, EC2)
 - **Experiment Tracking**: Weights & Biases (W&B)
-- **Containerization**: Docker, Docker Compose
+- **Containerization**: Docker
 - **Data Processing**: pandas, numpy
-- **Visualization**: matplotlib, seaborn
+- **Visualization**: matplotlib, seaborn, plotly
 
 ## Prerequisites
 
-Before you begin, ensure you have the following installed and configured:
+Before running the code locally, ensure you have the following installed and configured:
 
 ### System Requirements
 
-- **Python**: 3.11 or higher
-- **Docker**: 20.10 or higher
-- **Docker Compose**: 2.0 or higher
+- **Python**: 3.12 or higher
+- **Docker**: 20.10 or higher (if running locally)
 - **Git**: For cloning the repository
+- **AWS**: If planning to run using EC2 and AWS.  
 
 ### AWS Account Setup
 
 1. **AWS Account**: Create an AWS account if you don't have one
-2. **AWS CLI**: Install and configure AWS CLI (optional, for local development)
+2. **AWS CLI**: Install and configure AWS CLI (optional for local development)
 3. **Required AWS Services**:
    - **S3 Bucket**: Named `readcrumbs` (or update code to use your bucket name)
      - Store model files: `models/als_model-small-v1.pkl`
      - Store lookup tables: `data/v1/index_to_title.json`, `data/v1/title_to_index.json`
-   - **DynamoDB Table**: Named `readcrumbs-logs` (or set via `DDB_TABLE` env var)
+   - **DynamoDB Table**: Named `readcrumbs-logs`
      - Used for storing prediction logs
+   - **DynamoDB Table**: Named `readcrumbs-feedback`
+     - Used to store user feedback on provided predictions.
    - **EC2 Instance**: For production deployment
      - Recommended: t3.medium or larger
      - Ubuntu 22.04 LTS or Amazon Linux 2
@@ -96,7 +100,7 @@ Before you begin, ensure you have the following installed and configured:
 ### Weights & Biases Setup
 
 1. Create a W&B account at [wandb.ai](https://wandb.ai)
-2. Install W&B: `pip install wandb`
+2. Install W&B: `pip install wandb` or run in Docker container
 3. Login: `wandb login`
 4. Create a project named `readcrumbs` (or update in code)
 
@@ -112,7 +116,7 @@ Your AWS credentials need the following permissions:
 
 ## Environment Variables
 
-Create a `.env` file in the project root (never commit this file to git). Here's the structure:
+If not running inside Docker container on EC2 with IAM role, you should create a `.env` file in each separate part of the project (never commit this file to git). Here's the structure:
 
 ```bash
 # AWS Credentials
@@ -192,70 +196,23 @@ aws s3 ls s3://readcrumbs/
 aws dynamodb describe-table --table-name readcrumbs-logs
 ```
 
-## Running the Project Locally
+## Running the Project With EC2
 
-### Using Docker Compose (Recommended)
-
-The entire system is containerized and managed via Docker Compose.
-
-#### 1. Build Containers
-
-Build the Docker images for all services:
-
-```bash
-docker compose build
-```
-
-#### 2. Run All Services
-
-Start the entire MLOps system in detached mode:
-
-```bash
-docker compose up -d
-```
-
-To see logs:
-
-```bash
-docker compose up
-```
-
-#### 3. Verify Services are Running
-
-Check that all containers are up:
-
-```bash
-docker compose ps
-```
-
-You should see three services running:
-- `backend` (FastAPI)
-- `frontend` (Streamlit)
-- `monitoring` (Streamlit Dashboard)
+- Create four EC2 containers in AWS for the frontend, monitoring dashboard, backend server, and training the model, respectively. 
+- SSH into each container, add the files using the public IP, and create a Docker container. 
+- Run the Docker container, which should start each service. 
 
 #### 4. Access the Services
 
 Once running, access the services:
 
-- **FastAPI Backend API**: http://localhost:8000
+- **FastAPI Backend API**: http://localhost:8000 (or http://ec2-ip-address:8000)
   - Health Check: http://localhost:8000/health
   - API Docs: http://localhost:8000/docs
-- **Frontend Interface**: http://localhost:8080/
-- **Monitoring Dashboard**: http://localhost:8081/
-
-#### 5. Stop Services
-
-To stop and remove containers:
-
-```bash
-docker compose down
-```
-
-To stop and remove containers with volumes:
-
-```bash
-docker compose down -v
-```
+  - Prediction endpoint: http://localhost:8000/predict
+  - Feedback endpoint: http://localhost:8000/feedback
+- **Frontend Interface**: http://localhost:8501/ (or http://ec2-ip-address:8501)
+- **Monitoring Dashboard**: http://localhost:8501/ (or http://ec2-ip-address:8501)
 
 ### Running Individual Services
 
@@ -274,7 +231,7 @@ docker run -p 8000:8000 --env-file ../.env readcrumbs-backend
 ```bash
 cd frontend
 docker build -t readcrumbs-frontend .
-docker run -p 8080:8501 readcrumbs-frontend
+docker run -p 8501:8501 readcrumbs-frontend
 ```
 
 ## AWS EC2 Deployment
@@ -290,9 +247,8 @@ docker run -p 8080:8501 readcrumbs-frontend
 2. **Security Group Configuration**:
    - Open the following ports:
      - **Port 8000**: FastAPI backend (HTTP)
-     - **Port 8080**: Frontend interface (HTTP)
-     - **Port 8081**: Monitoring dashboard (HTTP)
      - **Port 22**: SSH (for initial setup)
+  - Allow access via HTTP and SSH. 
 
 3. **IAM Role** (Recommended):
    - Attach an IAM role to your EC2 instance with S3 and DynamoDB permissions
@@ -315,16 +271,12 @@ sudo apt-get update
 # Install Docker
 sudo apt-get install -y docker.io
 
-# Install Docker Compose
-sudo apt-get install -y docker-compose
-
 # Add your user to docker group (to run without sudo)
 sudo usermod -aG docker $USER
 newgrp docker
 
 # Verify installation
 docker --version
-docker compose version
 ```
 
 #### 3. Clone Repository
@@ -332,6 +284,11 @@ docker compose version
 ```bash
 git clone https://github.com/smiley-maker/readcrumbs
 cd readcrumbs
+```
+
+Or you can copy the files from your local computer to the EC2 container using:
+```bash
+scp -r -i path/to/your/key.pem folder/to/pass ubuntu@ipv4-address:~/       
 ```
 
 #### 4. Set Up Environment Variables
@@ -345,87 +302,8 @@ Add your environment variables (see [Environment Variables](#environment-variabl
 
 **Note**: If using IAM roles, you may only need `AWS_REGION` and `DDB_TABLE`.
 
-#### 5. Build and Run Containers
-
-```bash
-# Build containers
-docker compose build
-
-# Run in detached mode
-docker compose up -d
-
-# Check status
-docker compose ps
-
-# View logs
-docker compose logs -f
-```
-
-#### 6. Verify Deployment
-
-Test each service:
-
-```bash
-# Backend health check
-curl http://localhost:8000/health
-
-# Or from your local machine
-curl http://your-ec2-ip:8000/health
-```
-
-#### 7. Set Up as Systemd Service (Optional)
-
-For automatic startup on reboot:
-
-```bash
-# Create systemd service file
-sudo nano /etc/systemd/system/readcrumbs.service
-```
-
-Add the following:
-
-```ini
-[Unit]
-Description=ReadCrumbs MLOps Application
-Requires=docker.service
-After=docker.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/home/ubuntu/readcrumbs
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-User=ubuntu
-Group=docker
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable readcrumbs
-sudo systemctl start readcrumbs
-sudo systemctl status readcrumbs
-```
 
 ### Troubleshooting Deployment
-
-**Issue: Containers won't start**
-
-```bash
-# Check logs
-docker compose logs
-
-# Check if ports are already in use
-sudo netstat -tulpn | grep -E '8000|8080|8081'
-
-# Restart Docker daemon
-sudo systemctl restart docker
-```
 
 **Issue: AWS credentials not working**
 
@@ -470,7 +348,7 @@ Check if the API is running.
 }
 ```
 
-**cURL Example**:
+**CURL Example**:
 ```bash
 curl http://localhost:8000/health
 ```
@@ -613,100 +491,6 @@ FastAPI provides automatic interactive documentation:
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 
-## Frontend Usage
-
-The frontend is a Streamlit application that provides a user-friendly interface.
-
-### Accessing the Frontend
-
-- **Local**: http://localhost:8080/
-- **Production**: http://your-ec2-ip:8080/
-
-### How to Use
-
-1. **Enter Favorite Books**:
-   - In the text area, enter your favorite book titles
-   - Separate multiple books with commas
-   - Example: `The Great Gatsby, 1984, To Kill a Mockingbird`
-
-2. **Get Recommendations**:
-   - Click the "Analyze Sentiment" button (button text may vary)
-   - Wait for the API to process your request
-   - View your personalized book recommendations
-
-3. **View Results**:
-   - Recommendations appear as a numbered list
-   - Each recommendation is a book title
-
-### Input Format
-
-- Books should be entered as plain text titles
-- Separate multiple books with commas
-- Case-insensitive
-- The system will match titles from the model's vocabulary
-
-### Expected Output
-
-The frontend displays:
-- A list of 10 recommended book titles
-- Based on your input favorites
-- Ranked by relevance
-
-## Monitoring Dashboard
-
-The monitoring dashboard provides real-time insights into model performance and system health.
-
-### Accessing the Dashboard
-
-- **Local**: http://localhost:8081/
-- **Production**: http://your-ec2-ip:8081/
-
-### Features
-
-#### 1. Prediction Latency Over Time
-
-- Visualizes the time taken to process predictions
-- Helps identify performance degradation
-- Shows trends over time
-
-#### 2. Prediction Distribution (Target Drift)
-
-- Displays the distribution of predicted book titles
-- Helps detect data drift
-- Shows which books are being recommended most frequently
-
-#### 3. User Feedback Collection
-
-- Allows users to provide feedback on predictions
-- Tracks model accuracy based on user feedback
-- Calculates live accuracy metrics
-
-#### 4. Live Model Accuracy
-
-- Displays accuracy percentage based on user feedback
-- Updates in real-time as feedback is collected
-- Helps monitor model performance
-
-### How to Use
-
-1. **View Metrics**: The dashboard automatically loads and displays metrics from DynamoDB
-
-2. **Provide Feedback**:
-   - Enter a User ID in the text input
-   - View the most recent prediction for that user
-   - Select whether the prediction was correct
-   - Click "Submit Feedback"
-
-3. **Monitor Performance**:
-   - Check the "Live Model Accuracy" metric
-   - Review latency trends
-   - Monitor prediction distributions
-
-### Interpreting Metrics
-
-- **High Latency**: May indicate model or infrastructure issues
-- **Skewed Distribution**: Could indicate data drift or model bias
-- **Low Accuracy**: May require model retraining or data quality improvements
 
 ## Project Structure
 
@@ -723,24 +507,19 @@ readcrumbs/
 │   ├── Dockerfile             # Frontend container configuration
 │   └── requirements.txt       # Python dependencies
 ├── monitoring/
-│   ├── app.py                 # Streamlit monitoring dashboard
+│   ├── dashboard_app.py       # Streamlit monitoring dashboard
 │   ├── Dockerfile             # Monitoring container configuration
 │   └── requirements.txt       # Python dependencies
-├── experiment-tracking/
-│   └── wandb.py               # W&B experiment tracking and model registry
 ├── experiments/
 │   ├── training/
 │   │   ├── preprocess.py      # Data preprocessing utilities
 │   │   ├── train_model.py     # Model training script
-│   │   └── utils.py           # Training utilities
 │   └── notebooks/
 │       └── eda.ipynb          # Exploratory data analysis
-├── tests/
-│   └── test_preprocess.py     # Preprocessing tests
+|   |-- tracking/
+│       └── wandb_tracking.py  # W&B experiment tracking and model registry
 ├── data/
 │   └── README.md              # Data documentation
-├── docker-compose.yml          # Multi-container orchestration
-├── requirements.txt           # Root-level dependencies
 └── README.md                  # This file
 ```
 
@@ -748,9 +527,8 @@ readcrumbs/
 
 - **`backend/api.py`**: Main FastAPI application with prediction endpoints
 - **`frontend/readcrumbs_app.py`**: User-facing Streamlit interface
-- **`monitoring/app.py`**: Monitoring and analytics dashboard
-- **`experiment-tracking/wandb.py`**: W&B integration for model tracking
-- **`docker-compose.yml`**: Container orchestration configuration
+- **`monitoring/dashboard_app.py`**: Monitoring and analytics dashboard
+- **`experiments/tracking/wandb_tracking.py`**: W&B integration for model tracking
 
 ## Testing
 
@@ -766,13 +544,8 @@ pytest tests/test_api.py -v
 #### Preprocessing Tests
 
 ```bash
+cd experiments/training
 pytest tests/test_preprocess.py -v
-```
-
-#### Run All Tests
-
-```bash
-pytest tests/ -v
 ```
 
 ### Test Coverage
@@ -796,146 +569,6 @@ backend/tests/test_api.py::test_predict PASSED
 ======================== 3 passed in 2.34s ========================
 ```
 
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Docker Containers Won't Start
-
-**Symptoms**: `docker compose up` fails or containers exit immediately
-
-**Solutions**:
-```bash
-# Check logs
-docker compose logs
-
-# Rebuild containers
-docker compose build --no-cache
-
-# Check if ports are in use
-sudo lsof -i :8000
-sudo lsof -i :8080
-sudo lsof -i :8081
-```
-
-#### 2. AWS Credentials Not Working
-
-**Symptoms**: S3 or DynamoDB access errors
-
-**Solutions**:
-```bash
-# Verify credentials in .env file
-cat .env | grep AWS
-
-# Test AWS CLI access
-aws s3 ls s3://readcrumbs/
-aws dynamodb list-tables
-
-# Check IAM permissions
-aws iam get-user
-```
-
-#### 3. Model Not Loading
-
-**Symptoms**: Backend starts but predictions fail
-
-**Solutions**:
-- Verify model file exists in S3: `aws s3 ls s3://readcrumbs/models/`
-- Check model file path in `backend/api.py`
-- Verify S3 bucket permissions
-
-#### 4. DynamoDB Connection Issues
-
-**Symptoms**: Logs not saving or monitoring dashboard empty
-
-**Solutions**:
-```bash
-# Verify table exists
-aws dynamodb describe-table --table-name readcrumbs-logs
-
-# Check table permissions
-aws iam get-role-policy --role-name YourRoleName --policy-name YourPolicyName
-
-# Verify table name in environment variables
-echo $DDB_TABLE
-```
-
-#### 5. Frontend Not Connecting to Backend
-
-**Symptoms**: Frontend shows errors when requesting predictions
-
-**Solutions**:
-- Check API URL in `frontend/readcrumbs_app.py`
-- Verify backend is running: `curl http://localhost:8000/health`
-- Check CORS settings if needed
-- Verify network connectivity between containers
-
-#### 6. Monitoring Dashboard Shows No Data
-
-**Symptoms**: Dashboard loads but shows empty charts
-
-**Solutions**:
-- Verify DynamoDB table has data: `aws dynamodb scan --table-name readcrumbs-logs --limit 5`
-- Check table name matches in `monitoring/app.py`
-- Verify AWS credentials for monitoring container
-- Make some predictions first to generate data
-
-### Debugging Tips
-
-1. **View Container Logs**:
-   ```bash
-   docker compose logs backend
-   docker compose logs frontend
-   docker compose logs monitoring
-   ```
-
-2. **Access Container Shell**:
-   ```bash
-   docker compose exec backend bash
-   docker compose exec frontend bash
-   ```
-
-3. **Check Environment Variables**:
-   ```bash
-   docker compose exec backend env | grep AWS
-   ```
-
-4. **Test API Manually**:
-   ```bash
-   curl -X POST http://localhost:8000/predict \
-     -H "Content-Type: application/json" \
-     -d '{"items": ["test"], "userid": "123"}'
-   ```
-
-## Contributing
-
-### Development Workflow
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature-name`
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass: `pytest`
-6. Commit your changes: `git commit -m "Add your feature"`
-7. Push to the branch: `git push origin feature/your-feature-name`
-8. Open a Pull Request
-
-### Code Style
-
-- Follow PEP 8 for Python code
-- Use type hints where appropriate
-- Add docstrings to functions and classes
-- Keep functions focused and small
-
-### Reporting Issues
-
-If you encounter a bug or have a feature request, please open an issue on GitHub with:
-- Description of the problem
-- Steps to reproduce
-- Expected behavior
-- Actual behavior
-- Environment details (OS, Python version, Docker version)
-
 ## License
 
 This project is open source and available for educational and research purposes.
@@ -945,13 +578,3 @@ This project is open source and available for educational and research purposes.
 Developed by **Jordan Sinclair** and **Jordan Larson**
 
 - GitHub: [smiley-maker/readcrumbs](https://github.com/smiley-maker/readcrumbs)
-
-## Acknowledgments
-
-- Built with FastAPI, Streamlit, and Docker
-- Model tracking powered by Weights & Biases
-- Deployed on AWS infrastructure
-
----
-
-For questions or support, please open an issue on the GitHub repository.

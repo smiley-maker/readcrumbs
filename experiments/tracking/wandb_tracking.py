@@ -121,6 +121,9 @@ def promote_model_to_stage(registered_model_name, alias="staging", metric_name="
     """
     Promote a model version to a specific stage (staging/production) in the Model Registry.
     
+    Note: This function works by finding artifacts linked to the registered model and updating
+    their aliases. The model must have been previously linked using run.link_artifact().
+    
     Args:
         registered_model_name: Name of the registered model in Model Registry
         alias: Stage alias to assign ('staging' or 'production')
@@ -154,54 +157,138 @@ def promote_model_to_stage(registered_model_name, alias="staging", metric_name="
         if project_name is None:
             project_name = wandb.run.project if wandb.run else "readcrumbs"
         
-        # Access registered model
-        registered_model_path = f"{project_name}/{registered_model_name}"
-        registered_model = api.registered_model(registered_model_path)
+        entity = None
+        if wandb.run:
+            entity = wandb.run.entity if hasattr(wandb.run, 'entity') else None
         
-        if metric_value is not None:
+        # Since api.registered_model() doesn't exist, we access artifacts directly
+        # When an artifact is linked to a registered model via run.link_artifact(),
+        # it becomes accessible through the registered model name path
+        
+        project_path = f"{entity}/{project_name}" if entity else project_name
+        
+        # Try to access artifacts linked to the registered model
+        # The pattern is typically: entity/project/registered_model_name:alias
+        artifacts = []
+        
+        # First, check if we're in the current run and can access the artifact directly
+        if wandb.run:
+            try:
+                # Try to get the artifact from the current run
+                current_run = api.run(f"{project_path}/{wandb.run.id}")
+                for artifact_name in current_run.used_artifacts():
+                    artifact_str = str(artifact_name)
+                    if registered_model_name in artifact_str.lower():
+                        try:
+                            artifact = api.artifact(artifact_str)
+                            if artifact.type == "model":
+                                artifacts.append(artifact)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        
+        # Try accessing via the registered model name directly
+        # This works when artifacts are linked to the model registry
+        if not artifacts:
+            try:
+                # Try with :latest alias first
+                artifact = api.artifact(f"{project_path}/{registered_model_name}:latest")
+                if artifact.type == "model":
+                    artifacts.append(artifact)
+            except Exception:
+                pass
+        
+        # If that didn't work, search through recent runs for linked artifacts
+        if not artifacts:
+            print(f"Searching for artifacts linked to registered model '{registered_model_name}'...")
+            runs = api.runs(project_path, per_page=20)  # Check recent runs
+            
+            for run in runs:
+                try:
+                    # Check if this run has artifacts linked to our registered model
+                    # We'll look for artifacts that might be model artifacts
+                    for artifact_collection in run.used_artifacts():
+                        artifact_str = str(artifact_collection)
+                        # Try to get the artifact and check if it's a model
+                        try:
+                            artifact = api.artifact(artifact_str)
+                            # Check if this artifact is linked to our registered model
+                            # by checking if the registered model name appears in aliases or path
+                            if (artifact.type == "model" and 
+                                (registered_model_name in artifact_str.lower() or 
+                                 any(registered_model_name.lower() in str(alias).lower() 
+                                     for alias in (artifact.aliases or [])))):
+                                artifacts.append(artifact)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        
+        if not artifacts:
+            print(f"Note: No model artifacts found for registered model '{registered_model_name}'. "
+                  f"Make sure the model has been registered using run.link_artifact().")
+            print(f"Tried accessing: {project_path}/{registered_model_name}:latest")
+            return False
+        
+        # Sort artifacts by creation time (newest first)
+        try:
+            artifacts.sort(key=lambda a: a.created_at if hasattr(a, 'created_at') else 0, reverse=True)
+        except Exception:
+            pass
+        
+        if metric_value is None:
+            # Promote the latest version
+            latest_artifact = artifacts[0]
+            current_aliases = list(latest_artifact.aliases) if latest_artifact.aliases else []
+            if alias not in current_aliases:
+                current_aliases.append(alias)
+                latest_artifact.aliases = current_aliases
+                latest_artifact.save()
+                print(f"Promoted latest model version to '{alias}' stage")
+                return True
+            else:
+                print(f"Model already has '{alias}' alias")
+                return True
+        else:
             # Find the best model based on metric
-            best_version = None
+            best_artifact = None
             best_metric = float('-inf') if comparison == "max" else float('inf')
             
-            for version in registered_model.versions:
-                # Get metadata from the artifact
+            for artifact in artifacts:
                 try:
-                    artifact = version.artifact
                     version_metadata = artifact.metadata or {}
                     version_metric = version_metadata.get(metric_name)
                     
                     if version_metric is not None:
                         if comparison == "max" and version_metric > best_metric:
                             best_metric = version_metric
-                            best_version = version
+                            best_artifact = artifact
                         elif comparison == "min" and version_metric < best_metric:
                             best_metric = version_metric
-                            best_version = version
+                            best_artifact = artifact
                 except Exception:
                     continue
             
-            if best_version:
-                # Update aliases
-                current_aliases = list(best_version.aliases) if best_version.aliases else []
+            if best_artifact:
+                current_aliases = list(best_artifact.aliases) if best_artifact.aliases else []
                 if alias not in current_aliases:
                     current_aliases.append(alias)
-                    best_version.aliases = current_aliases
-                    best_version.update()
-                    print(f"Promoted model version {best_version.version} to '{alias}' stage "
-                          f"(metric: {metric_name}={best_metric})")
+                    best_artifact.aliases = current_aliases
+                    best_artifact.save()
+                    print(f"Promoted model to '{alias}' stage (metric: {metric_name}={best_metric})")
                     return True
-        else:
-            # Promote the latest version
-            if registered_model.versions:
-                latest_version = registered_model.versions[0]
-                current_aliases = list(latest_version.aliases) if latest_version.aliases else []
-                if alias not in current_aliases:
-                    current_aliases.append(alias)
-                    latest_version.aliases = current_aliases
-                    latest_version.update()
-                    print(f"Promoted latest model version {latest_version.version} to '{alias}' stage")
-                    return True
+            else:
+                print(f"Could not find a model with metric '{metric_name}' in metadata")
+                return False
         
+        return False
+        
+    except AttributeError as e:
+        print(f"Error: API method not available in this wandb version: {e}")
+        print(f"Consider updating wandb: pip install --upgrade wandb")
+        print(f"Note: Model linking via run.link_artifact() should still work. "
+              f"Promotion to stages may need to be done manually in the wandb UI.")
         return False
     except Exception as e:
         print(f"Error promoting model: {e}")
@@ -315,43 +402,5 @@ final_metrics = {
     "final_f1_score": metrics["f1_score"],
 }
 wandb.log(final_metrics)
-
-# Save the trained model as an artifact and register it in Model Registry
-# Example usage (uncomment and modify based on your model):
-# model = your_trained_model  # Replace with your actual model
-# 
-# # Prepare metadata with performance metrics
-# model_metadata = {
-#     "final_accuracy": final_metrics["final_accuracy"],
-#     "final_f1_score": final_metrics["final_f1_score"],
-#     "epochs": hyperparameters["epochs"],
-#     "learning_rate": hyperparameters["learning_rate"],
-#     "batch_size": hyperparameters["batch_size"],
-#     "code_version": wandb.config.get("code_version", "unknown"),
-#     "data_version": wandb.config.get("data_version", "unknown"),
-# }
-# 
-# # Save and register model with automatic promotion to staging if it's the best
-# artifact, promoted = save_and_register_model(
-#     model=model,
-#     model_name="readcrumbs-model",
-#     model_type="pytorch",  # or "tensorflow", "sklearn", "pickle"
-#     registered_model_name="readcrumbs-model",  # Name in Model Registry
-#     metadata=model_metadata,
-#     auto_promote=True,  # Automatically promote to staging if best model
-#     promotion_stage="staging",  # or "production"
-#     promotion_metric="f1_score"  # Metric to use for comparison
-# )
-# 
-# if promoted:
-#     print(f"Model automatically promoted to staging based on {promotion_metric}")
-# 
-# # Alternatively, manually promote to production after review:
-# # promote_model_to_stage(
-# #     registered_model_name="readcrumbs-model",
-# #     alias="production",
-# #     metric_name="f1_score",
-# #     comparison="max"
-# # )
 
 wandb.finish()

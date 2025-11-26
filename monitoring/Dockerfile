@@ -1,5 +1,4 @@
-# Use Python 3.11 slim image as base
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Set working directory
 WORKDIR /app
@@ -11,11 +10,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app.py .
+COPY dashboard_app.py .
 
 # Expose Streamlit port
 EXPOSE 8501
 
 # Run Streamlit app
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-
+CMD ["streamlit", "run", "dashboard_app.py"]
