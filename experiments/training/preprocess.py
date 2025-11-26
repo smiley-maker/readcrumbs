@@ -2,70 +2,8 @@ import pandas as pd
 import json
 import boto3
 from typing import Union
-from io import BytesIO, StringIO
+from io import BytesIO
 
-
-def load_data(bucket : str, objectkey : str, client) -> pd.DataFrame:
-    """Loads the original dataset from S3 storage.
-
-    Args:
-        bucket (str): The bucket name where the data is stored. 
-        objectkey (str): The path to the file in the bucket. 
-        client: boto3 client to handle data reading. 
-
-    Returns:
-        pd.DataFrame: Reads all lines from JSONL file and creates a dataframe. 
-    """
-
-    try:
-        # Get the object from S3
-        response = client.get_object(Bucket=bucket, Key=objectkey)
-        
-        # Read the content stream
-        s3_body = response["Body"]
-
-        # Initialize an empty list to store the parsed JSON objects.
-        data = []
-
-        # Iterate over each line in the stream
-        # It must be decoded because the stream gives bytes. 
-        for line in s3_body.iter_lines():
-            data.append(json.loads(line.decode('utf-8')))
-        
-        # Convert the data list into a pandas dataframe
-        df = pd.DataFrame(data)
-        print("Dataframe created!")
-        print(df.head())
-
-        # Return the dataframe. 
-        return df
-    
-    except Exception as e:
-        print(f"Error reading JSONL object from S3: {e}")
-
-
-
-def load_csv_data_optimized(bucket: str, objectkey: str, client) -> pd.DataFrame:
-    """Loads CSV dataset from S3, streaming the body directly to pandas."""
-
-    try: 
-        # Get the object from S3
-        print("Getting data from S3")
-        response = client.get_object(Bucket=bucket, Key=objectkey)
-
-        # The 'Body' is a streamable object (a botocore.response.StreamingBody).
-        # pandas.read_csv can handle this stream directly, which avoids loading
-        # the entire file into a Python string variable first.
-        print("Reading CSV")
-        df = pd.read_csv(response['Body'])
-
-        print(f"Dataframe with {len(df):,} rows created.")
-        # print(df.head()) # Keep this for verification if you like
-
-        return df
-    except Exception as e:
-        print(f"Error reading CSV from S3 storage: {e}")
-        return pd.DataFrame() # Return empty DF on failure
 
 def load_csv_data(bucket : str, objectkey: str, client) -> pd.DataFrame:
     """Loads CSV dataset from S3
@@ -89,18 +27,6 @@ def load_csv_data(bucket : str, objectkey: str, client) -> pd.DataFrame:
         # the entire file into a Python string variable first.
         print("Reading CSV directly from S3 stream...")
         df = pd.read_csv(response['Body'])
-
-        # Read the response body and decode bytes to string
-#        print("Encoding data to string")
-#        csv_body = response['Body'].read().decode('utf-8')
-
-        # Use StringIO to treat the string as a file-like object for pandas
-#        print("STRINGIO")
-#        data = StringIO(csv_body)
-
-        # Read the data into a DataFrame
-#        print("Reading as CSV")
-#        df = pd.read_csv(data)
 
         print(f"Dataframe with {len(df)} rows created.")
         print(df.head())
@@ -127,18 +53,14 @@ def save_data(data : Union[pd.DataFrame, dict], bucket : str, objectkey : str, c
     try:
         # Check if data is a DataFrame or dictionary
         if type(data) == pd.DataFrame:
-            print("Saving dataframe...")
             # We want to save as a parquet file. 
             # Need to create a buffer for pandas conversion process
             buffer = BytesIO()
 
             # Write the parquet file to the buffer
-            print("Converting to parquet...")
             data.to_parquet(buffer)
-#            data.to_csv(buffer)
 
             # Set the dataset equal to the value of the buffer. 
-            print("Gettting value of buffer...")
             dataset = buffer.getvalue()
         
         elif type(data) == dict:
@@ -150,7 +72,6 @@ def save_data(data : Union[pd.DataFrame, dict], bucket : str, objectkey : str, c
             print(f"Unsupported type: {type(data)}")
             return False
 
-        print("Putting the object in aws s3")
         client.put_object(
             Bucket=bucket,
             Key=objectkey,
@@ -164,36 +85,6 @@ def save_data(data : Union[pd.DataFrame, dict], bucket : str, objectkey : str, c
         print(e)
         return False
 
-
-
-def join_datasets(books : pd.DataFrame, meta : pd.DataFrame) -> pd.DataFrame:
-    """The books dataset contains reviews for various books, 
-       but doesn't contain the titles that we would want to return
-       to the user when recommending books. So this function joins the
-       two datasets, combining information from each.
-
-    Args:
-        books (pd.DataFrame): Amazon books dataset containing reviews
-        meta (pd.DataFrame): Meta data about each book
-
-    Returns:
-        pd.DataFrame: A dataframe joined on parent_asin column.
-    """
-
-    # Perform an inner join with books and meta data on parent_asin.
-    df = books.merge(meta, on="parent_asin", how="inner", suffixes=('_review', '_book'))
-
-    # This dataframe contains columns we won't need. 
-    # Let's select only the required ones, which would include
-    # the rating, user_id, and title_book columns. 
-    useful_cols = ["rating", "user_id", "title_book"]
-    df = df[useful_cols]
-
-    # Now that we have all necessary columns, let's remove all null values
-    df = df.dropna(axis=0)
-
-    # Return the preprocessed dataset.
-    return df
 
 def preprocess_data(df : pd.DataFrame, feats : list[str] = None) -> pd.DataFrame:
     """Preprocesses the reviews dataset by selecting relevant 
@@ -229,10 +120,15 @@ def preprocess_data(df : pd.DataFrame, feats : list[str] = None) -> pd.DataFrame
 
 
 def create_mappings(df : pd.DataFrame, title_col : str = "title_book") -> tuple[dict, dict]:
-    """_summary_
+    """Creates mapping dictionaries for book titles to indices and vice versa.
 
     Args:
-        df (pd.DataFrame): _description_
+        df (pd.DataFrame): Dataframe containing book titles.
+        title_col (str, optional): The column name containing book titles. Defaults to "title_book".
+    Returns:
+        tuple[dict, dict]: A tuple containing two dictionaries:
+            - title_to_index: Maps book titles to their corresponding indices.
+            - index_to_title: Maps indices back to their corresponding book titles.
     """
 
     # Convert the book title into a categorical column (each name = new book)
@@ -254,23 +150,7 @@ if __name__=="__main__":
     print("Creating client")
     client = boto3.client("s3")
 
-    # Load books and meta datasets from S3 storage - too large (30gb)
-#    books = load_data(
-#        bucket="readcrumbs",
-#        objectkey="dataset/raw/book_reviews.jsonl",
-#        client=client
-#    )
-
-#    meta = load_data(
-#        bucket="readcrumbs",
-#        objectkey="dataset/raw/book_data.jsonl",
-#        client=client
-#    )
-
-    # Obtain joined dataframe
-#    df = join_datasets(books, meta)
-
-    # Load smaller dataset
+    # Load dataset from S3
     print("Loading dataset")
     df = load_csv_data(
         bucket="readcrumbs",
@@ -284,6 +164,7 @@ if __name__=="__main__":
         df=df
     )
 
+    # Save processed dataset back to S3
     print("Saving Dataset")
     res = save_data(
         data=df,
@@ -292,7 +173,7 @@ if __name__=="__main__":
         client=client
     )
 
-#    assert res
+    assert res
 
     if not res:
         print(f"Error saving processed dataset.")

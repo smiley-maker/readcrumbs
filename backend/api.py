@@ -9,6 +9,9 @@ import numpy as np
 from typing import List
 from pydantic import BaseModel
 import io
+import pandas as pd
+from decimal import Decimal
+
 
 class MyFavorites(BaseModel):
     items: List[str] # List of favorite book titles
@@ -16,6 +19,16 @@ class MyFavorites(BaseModel):
     
 class PredictionResponse(BaseModel):
     recs: List[str] # titles of the recommended books
+
+class FeedbackItem(BaseModel):
+    userid: str
+    reccommendations: List[str]
+    feedback: int # 1 = like
+    title: str
+    position: int
+    timestamp: datetime.datetime
+
+
 
 ## Helper Functions
 def load_supporting_tables_from_s3(table_name: str, client = None) -> dict:
@@ -38,6 +51,29 @@ def load_supporting_tables_from_s3(table_name: str, client = None) -> dict:
     table = json.loads(table_bytes)
     
     return table
+
+def load_dataset_from_s3(bucket_name: str, file_key: str, client = None) -> pd.DataFrame:
+    """Download and load a dataset file from S3 into memory without persisting it to disk.
+
+    Args:
+        bucket_name (str): The S3 bucket name.
+        file_key (str): The key/path of the dataset file in the S3 bucket.
+
+    Returns:
+        pd.DataFrame: The loaded dataset as a pandas DataFrame.
+    """
+    if client is None:
+        client = boto3.client('s3')
+    
+    # Get the object from S3
+    response = client.get_object(Bucket=bucket_name, Key=file_key)
+    
+    # Load the dataset from the bytes in memory
+    buffer = io.BytesIO(response['Body'].read())
+    df = pd.read_parquet(buffer)
+
+    return df
+
 
 def load_model_from_s3(model_name: str, client = None):
     """
@@ -75,7 +111,7 @@ def load_model_from_s3(model_name: str, client = None):
 
     return model
 
-def predict_using_model(data: MyFavorites, n_recs: int = 10) -> list[str]:
+def predict_using_model(data: MyFavorites, n_recs: int = 10) -> tuple[list[str], float, float]:
     """Gets n_recs recommendations based on the users favorite books.
 
     Args:
@@ -92,10 +128,17 @@ def predict_using_model(data: MyFavorites, n_recs: int = 10) -> list[str]:
     fav_vectors = [model.item_factors[int(i)] for i in my_favs_ids]
     #Average the vectors together to get a single user vector
     avg_vec = np.average(np.stack(fav_vectors), axis=0)
+    # Calculate similarities using a dot product between the user vector and all item vectors
+    sims = np.dot(avg_vec, model.item_factors.T)
     # Get the top n_recs recommendations by finding the closest item vectors to the user vector
-    recommendations = np.argsort(np.dot(avg_vec, model.item_factors.T))[:n_recs]
-    # Convert the item ids back to titles
-    return [index_to_title[str(i)] for i in recommendations]
+    recommendations = np.argsort(sims)[:n_recs]
+    # Get an estimate of confidence for this request
+    confidence = np.average([sims[r] for r in recommendations])
+    # Get max similarity score
+    max_sim = sims[recommendations[0]]
+    # Convert the item ids back to titles using the index_to_title mapping
+    # Return the list of recommended titles, confidence, and max similarity
+    return [index_to_title[str(i)] for i in recommendations], confidence, max_sim
 
 def serialize_for_dynamodb(data):
     """
@@ -113,17 +156,13 @@ def serialize_for_dynamodb(data):
 
 
 
-def get_dynamodb_table(table_name: str = None):
+def get_dynamodb_table(table_name: str = "readcrumbs-logs"):
     """
     Get a DynamoDB table resource with proper credentials.
     
     Returns:
         boto3 DynamoDB Table resource
     """
-#    table_name = os.environ.get("DDB_TABLE")
-    if not table_name:
-#        raise ValueError("DDB_TABLE environment variable not set.")
-        table_name = "readcrumbs-logs"
     
     region = os.environ.get("AWS_REGION", "us-east-1")
     
@@ -175,10 +214,10 @@ def get_random_item_from_ddb():
 def save_to_ddb(data, table_name: str = None):
     """
     Save or update a dictionary of data to DynamoDB.
-    Uses user_id (integer) as the primary key. If user_id already exists, the item will be updated.
+    Uses userid (integer) as the primary key. If userid already exists, the item will be updated.
     
     Args:
-        data: Dictionary containing user_id (int) and other fields. user_id is used as primary key.
+        data: Dictionary containing userid (int) and other fields. userid is used as primary key.
         table_name (str, optional): Name of the DynamoDB table. 
             If None, defaults to "readcrumbs-logs".
     
@@ -189,24 +228,24 @@ def save_to_ddb(data, table_name: str = None):
     # Get the DynamoDB table with the table name
     table = get_dynamodb_table(table_name)
     
-    # Serialize data for DynamoDB (convert datetime objects, etc.)
+    # Serialize data for DynamoDB (convert datetime objects, lists, etc.)
     serialized_data = serialize_for_dynamodb(data)
     
-    # Ensure user_id exists (required as primary key)
+    # Ensure userid exists (required as primary key)
     if 'userid' not in serialized_data:
         raise ValueError("userid is required in the request body")
     
     response = table.put_item(Item=serialized_data)
-    print(response)
     return response
 
-## API
+## FastAPI app
 
 app = FastAPI()
 
 # Set up a client so we don't have to keep recreating it
 s3_client = boto3.client("s3")
 
+# Load the model and supporting tables into memory
 model = load_model_from_s3("models/als_model-small-v1.pkl", client=s3_client)
 index_to_title = load_supporting_tables_from_s3("data/v1/index_to_title.json", client=s3_client)
 title_to_index = load_supporting_tables_from_s3("data/v1/title_to_index.json", client=s3_client)
@@ -219,22 +258,29 @@ def health_check():
 def get_random():
     """
     Get a random item from the DynamoDB table.
+
+    Raises:
+        HTTPException404: 404 error if no items found in table.
+        HTTPException500: 500 error for any issues during retrieval.
     
     Returns:
         dict: A random item from the table
     """
-    random_item = get_random_item_from_ddb()
-    if random_item is None:
-        raise HTTPException(status_code=404, detail="No items found in table")
-    return random_item
+    try:
+        random_item = get_random_item_from_ddb()
+        if random_item is None:
+            raise HTTPException(status_code=404, detail="No items found in table")
+        return random_item
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error retrieving random item: {str(e)}")
 
 
 @app.post("/feedback")
-def submit_feedback(feedback: dict):
-    """Submit feedback to DynamoDB.
+def submit_feedback(feedback: FeedbackItem):
+    """Submit user feedback (like) to DynamoDB table.
 
     Args:
-        feedback (dict): Feedback data to store in DynamoDB.
+        feedback (FeedbackItem): Feedback data to store in DynamoDB.
 
     Raises: 
         HTTPException500: 500 error for any issues during saving feedback.
@@ -269,14 +315,21 @@ def predict(request: MyFavorites) -> PredictionResponse:
 
     try:
         # Get recommendations using the model
-        recs = predict_using_model(request.items)
+        # Calculate processing time
+        timestart = datetime.datetime.now()
+        recs, confidence, max_sim = predict_using_model(request.items)
+        timeend = datetime.datetime.now()
+        latency = (timeend - timestart).total_seconds() * 1000  # in milliseconds
 
         # Log the request and prediction to DynamoDB
         logs = {
             "items": request.items,
             "userid": request.userid,
             "timestamp": datetime.datetime.now(datetime.timezone.utc),
-            "prediction": recs
+            "prediction": recs,
+            "confidence": Decimal(str(confidence)),
+            "max_similarity": Decimal(str(max_sim)),
+            "latency": Decimal(str(latency)),
         }
 
         # Save the logs to DynamoDB

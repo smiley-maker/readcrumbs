@@ -6,13 +6,9 @@ No large raw or processed data files are committed to Git. These files are eithe
 
 ## Data Source Details
 
-The foundation of our recommendation model is the Amazon Review Data.
+We originally planned to use the complete Amazon Book Reviews dataset, but at about 20 GB it was intractable for smaller AWS computes to preprocess and run training with this dataset. Some experimentation with portions of this dataset can be found the exploratory analysis notebook. The dataset came from Julian McAuley's Amazon Review Dataset, and included ratings, books, and users files in a JSONL format. The link is: https://amazon-reviews-2023.github.io/.
 
-| Attribute | Details |
-| :------- | :------: |
-| Dataset Name | Amazon Review Data — Books Subset |
-| Original Source     | Julian McAuley's Amazon Review Dataset   |
-| Dataset Components   | Ratings, Books, and Users files (specific format depends on chosen subset)   |
-| Size     | 10.3 million users, 4.4 million items, and 29.5 million ratings     |
-| License     | Open access for non-commercial research purposes.     |
-| Link     | https://amazon-reviews-2023.github.io/     |
+
+## Smaller Dataset
+
+Due to the size of the dataset above, we decided to use a smaller dataset from Kaggle for testing on smaller computes in AWS. This dataset included book details and reviews CSV files, but only the reviews data was used to train a collaborative filtering model, although it would be worth exploring a hybrid using both datasets and content based filtering as well. The link is: https://www.kaggle.com/datasets/mohamedbakhet/amazon-books-reviews. 

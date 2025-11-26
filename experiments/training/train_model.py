@@ -70,7 +70,7 @@ def train_als_model(
 
     Returns:
         implicit model: Returns the trained model
-    """    
+    """
 
     # Initialize the ALS model
     model = AlternatingLeastSquares(factors=factors, regularization=regularization, iterations=iterations)
@@ -127,58 +127,34 @@ if __name__ == "__main__":
         client=client
     )
     
-    print("Model trained and saved successfully.")
+    print("Model trained and saved successfully.")    
 
-    model_metadata = {
-        "precision_at_k": precision_at_k,
-        "iterations": iterations,
-        "factors": factors,
-        "regularization": regularization,
-        "data_version": "data/processed/ratings-small-v1.parquet",
-        "code_version": get_git_commit_hash(),
-        "model_file": model_file,
-        "promotion_metric": "precision_at_k"
-    }
-
-    print("Saving model to registry.")
-    
     # Initialize wandb
-    wandb.init(
+    run = wandb.init(
         project="readcrumbs",
         name="small-v1",
         config={
-            "precision_at_k": p_at_k,
             "regularization": regularization,
             "factors": factors,
             "iterations": iterations,
             "model_file": model_file,
-            "code_version": get_git_commit_hash(),
             "data_version": "data/processed/ratings-small-v1.parquet",  # Update with your actual data path
         }
     )
 
     # Register model
-
     artifact = wandb.Artifact(
         name="readcrumbs-model-small-v1", 
         type="model"
     )
 
-    # Save and register model with automatic promotion to staging if it's the best
-    promotion_metric = "precision_at_k"
-    artifact, promoted = save_and_register_model(
-        model=model,
-        model_name="readcrumbs-model-small-v1",
-        model_type="pickle",
-        registered_model_name="readcrumbs-model-small-v1",  # Name in Model Registry
-        metadata=model_metadata,
-        auto_promote=True,  # Automatically promote to staging if best model
-        promotion_stage="staging",  # or "production"
-        promotion_metric=promotion_metric  # Metric to use for comparison
-    )
-    
-    if promoted:
-        print(f"Model automatically promoted to staging based on {promotion_metric}")
+    # Add the model file to the artifact
+    artifact.add_file(model_file)
 
+    # Log the artifact to wandb
+    run.log_artifact(artifact)
 
-    wandb.finish()
+    # Log precision at k
+    run.log({"precision_at_k": p_at_k})
+
+    run.finish()
