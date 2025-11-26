@@ -102,12 +102,16 @@ def save_model_artifact(model, model_name="model", model_type="pytorch", metadat
             artifact.wait()  # Wait for artifact to be logged
             run = wandb.run
             if run:
-                # Link artifact to registered model
-                run.link_artifact(
-                    artifact,
-                    f"{registered_model_name}:latest",
-                    aliases=["latest"]
-                )
+                try:
+                    # Link artifact to registered model
+                    run.link_artifact(
+                        artifact,
+                        f"{registered_model_name}:latest",
+                        aliases=["latest"]
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not link artifact to registered model: {e}")
+                    print(f"Artifact '{artifact.name}' was saved but not linked to model registry.")
     
     return artifact
 
